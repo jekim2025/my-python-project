@@ -1,0 +1,1451 @@
+import os
+import time
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from dotenv import load_dotenv
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import re
+import requests
+import pickle
+from datetime import datetime, timedelta
+from selenium.webdriver.chrome.options import Options
+
+# 1. 환경변수(.env)에서 Stibee 로그인 정보 불러오기
+print("환경변수 로드 중...")
+load_dotenv('C:/Users/7040_64bit/Desktop/20250708.env')
+
+STIBEE_EMAIL = os.getenv('STIBEE_EMAIL')
+STIBEE_PASSWORD = os.getenv('STIBEE_PASSWORD')
+STIBEE_API_KEY = os.getenv('STIBEE_API_KEY')  # API 키 추가
+
+print("환경변수 로드 확인:")
+print(f"이메일: {STIBEE_EMAIL}")
+print(f"비밀번호: {'*' * len(STIBEE_PASSWORD) if STIBEE_PASSWORD else 'None'}")
+print(f"API 키: {'있음' if STIBEE_API_KEY else '없음'}")
+
+# 로그인 정보 유효성 검사
+if not STIBEE_EMAIL or not STIBEE_PASSWORD:
+    print("❌ 이메일 또는 비밀번호가 설정되지 않았습니다.")
+    print("❌ .env 파일을 확인해주세요.")
+    exit(1)
+
+if '@' not in STIBEE_EMAIL:
+    print("❌ 이메일 형식이 올바르지 않습니다.")
+    exit(1)
+
+print("✅ 로그인 정보 로드 완료")
+
+# 2. 구글 시트 인증
+print("🔐 구글시트 인증 중...")
+
+# 인증 파일 경로 확인
+json_path = 'C:/Users/7040_64bit/Desktop/python/single-arcadia-436209-g2-ebfcbea8518b.json'
+if not os.path.exists(json_path):
+    print(f"❌ 구글시트 인증 파일을 찾을 수 없습니다: {json_path}")
+    print("❌ 인증 파일이 올바른 경로에 있는지 확인해주세요.")
+    exit(1)
+
+print(f"✅ 인증 파일 발견: {json_path}")
+
+# 인증 파일 내용 확인
+try:
+    with open(json_path, 'r', encoding='utf-8') as f:
+        json_content = f.read()
+        print(f"📄 인증 파일 크기: {len(json_content)} bytes")
+        if len(json_content) < 100:
+            print("❌ 인증 파일이 너무 작습니다. 파일이 손상되었을 수 있습니다.")
+            exit(1)
+        print("✅ 인증 파일 내용 확인 완료")
+except Exception as e:
+    print(f"❌ 인증 파일 읽기 실패: {e}")
+    exit(1)
+
+# 시트 URL 설정
+sheet_url = 'https://docs.google.com/spreadsheets/d/1kAO3oRGPuLSEPx_4nYuSYiUf0m3xdbqtI1hR42WNfjU/edit?gid=0'
+print(f"📄 구글시트 URL: {sheet_url}")
+
+# 인증 범위 설정
+scope = [
+    'https://spreadsheets.google.com/feeds',
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/spreadsheets'
+]
+
+print(f"🔑 인증 범위: {scope}")
+
+try:
+    print("🔐 ServiceAccountCredentials 생성 중...")
+    creds = ServiceAccountCredentials.from_json_keyfile_name(json_path, scope)
+    print("✅ ServiceAccountCredentials 생성 성공")
+    
+    print("🔐 gspread 클라이언트 인증 중...")
+    client = gspread.authorize(creds)
+    print("✅ gspread 클라이언트 인증 성공!")
+    
+    # 인증된 클라이언트 정보 확인
+    print(f"🔑 인증된 클라이언트: {type(client)}")
+    
+    # 간단한 연결 테스트
+    try:
+        print("🔍 구글시트 연결 테스트 중...")
+        test_spreadsheet = client.open_by_url(sheet_url)
+        print(f"✅ 구글시트 연결 성공: {test_spreadsheet.title}")
+        
+        # 워크시트 목록 확인
+        worksheets = test_spreadsheet.worksheets()
+        print(f"📋 워크시트 목록: {[ws.title for ws in worksheets]}")
+        
+        # '메일 발송 성과' 워크시트 존재 확인
+        target_worksheet = None
+        for ws in worksheets:
+            if ws.title == '메일 발송 성과':
+                target_worksheet = ws
+                break
+        
+        if target_worksheet:
+            print(f"✅ '메일 발송 성과' 워크시트 발견")
+            # 워크시트 정보 확인
+            print(f"📊 워크시트 크기: {target_worksheet.row_count}행 x {target_worksheet.col_count}열")
+        else:
+            print(f"❌ '메일 발송 성과' 워크시트를 찾을 수 없습니다")
+            print(f"💡 사용 가능한 워크시트: {[ws.title for ws in worksheets]}")
+            print(f"💡 정확한 워크시트명을 확인해주세요")
+        
+    except Exception as e:
+        print(f"❌ 구글시트 연결 테스트 실패: {e}")
+        print(f"💡 시트 URL이나 권한을 확인해주세요")
+        
+except Exception as e:
+    print(f"❌ 구글시트 인증 실패: {e}")
+    print("❌ 인증 파일의 내용이나 권한을 확인해주세요.")
+    print("❌ 구글 클라우드 프로젝트에서 서비스 계정이 활성화되어 있는지 확인해주세요.")
+    import traceback
+    traceback.print_exc()
+    exit(1)
+
+# 3. Selenium 드라이버 설정
+chrome_options = Options()
+chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+service = Service(r'C:/Users/7040_64bit/Desktop/python/chromedriver.exe')
+driver = webdriver.Chrome(service=service, options=chrome_options)
+
+def stibee_login():
+    """스티비 로그인 함수"""
+    print("스티비 로그인 중...")
+    
+    try:
+        # 로그인 페이지로 이동
+        driver.get('https://stibee.com/login')
+        time.sleep(5)
+        
+        print(f"현재 URL: {driver.current_url}")
+        
+        # 이메일 입력란 찾기 (여러 XPATH 패턴 시도)
+        email_input = None
+        email_patterns = [
+            '//*[@id="login-form"]/fieldset[1]/div[1]/div/div[2]/div/div/div/input',
+            '//input[@type="email"]',
+            '//input[@name="email"]',
+            '//input[contains(@placeholder, "이메일")]',
+            '//input[contains(@placeholder, "email")]',
+            '//input[contains(@class, "email")]'
+        ]
+        
+        for pattern in email_patterns:
+            try:
+                email_input = driver.find_element(By.XPATH, pattern)
+                print(f"이메일 입력란 발견: {pattern}")
+                break
+            except:
+                continue
+        
+        if not email_input:
+            print("❌ 이메일 입력란을 찾을 수 없습니다.")
+            # 페이지 소스 저장하여 디버깅
+            with open('login_page.html', 'w', encoding='utf-8') as f:
+                f.write(driver.page_source)
+            print("로그인 페이지 HTML을 login_page.html로 저장했습니다.")
+            return False
+        
+        # 이메일 입력
+        email_input.clear()
+        email_input.send_keys(STIBEE_EMAIL)
+        print("이메일 입력 완료")
+        time.sleep(1)
+        
+        # 비밀번호 입력란 찾기 (여러 XPATH 패턴 시도)
+        password_input = None
+        password_patterns = [
+            '//*[@id="login-form"]/fieldset[1]/div[2]/div/div[2]/div/div/div/div/input',
+            '//input[@type="password"]',
+            '//input[@name="password"]',
+            '//input[contains(@placeholder, "비밀번호")]',
+            '//input[contains(@placeholder, "password")]',
+            '//input[contains(@class, "password")]'
+        ]
+        
+        for pattern in password_patterns:
+            try:
+                password_input = driver.find_element(By.XPATH, pattern)
+                print(f"비밀번호 입력란 발견: {pattern}")
+                break
+            except:
+                continue
+        
+        if not password_input:
+            print("❌ 비밀번호 입력란을 찾을 수 없습니다.")
+            return False
+        
+        # 비밀번호 입력
+        password_input.clear()
+        password_input.send_keys(STIBEE_PASSWORD)
+        print("비밀번호 입력 완료")
+        time.sleep(1)
+        
+        # 로그인 버튼 찾기 (여러 XPATH 패턴 시도)
+        login_button = None
+        login_patterns = [
+            '//*[@id="login-form"]/div/button',
+            '//button[@type="submit"]',
+            '//button[contains(text(), "로그인")]',
+            '//button[contains(text(), "Login")]',
+            '//input[@type="submit"]',
+            '//button[contains(@class, "login")]',
+            '//button[contains(@class, "submit")]'
+        ]
+        
+        for pattern in login_patterns:
+            try:
+                login_button = driver.find_element(By.XPATH, pattern)
+                print(f"로그인 버튼 발견: {pattern}")
+                break
+            except:
+                continue
+        
+        if not login_button:
+            print("❌ 로그인 버튼을 찾을 수 없습니다.")
+            return False
+        
+        # 로그인 버튼 클릭
+        login_button.click()
+        print("로그인 버튼 클릭")
+        
+        # 로그인 후 대기 및 확인
+        time.sleep(8)
+        print(f"로그인 후 현재 URL: {driver.current_url}")
+        
+        # 로그인 성공 여부 확인
+        if 'login' in driver.current_url.lower():
+            print("❌ 로그인 실패: 여전히 로그인 페이지에 있음")
+            return False
+        
+        # 대시보드로 이동 시도
+        try:
+            driver.get('https://stibee.com/dashboard')
+            time.sleep(5)
+            print(f"대시보드 이동 후 현재 URL: {driver.current_url}")
+            
+            if 'login' in driver.current_url.lower():
+                print("❌ 세션 만료로 로그인 페이지로 이동됨")
+                return False
+                
+        except Exception as e:
+            print(f"대시보드 이동 실패: {e}")
+            return False
+        
+        # 발송완료 페이지로 이동 시도
+        try:
+            driver.get('https://stibee.com/emails/1?emailStatus=3')
+            time.sleep(5)
+            print(f"발송완료 페이지 진입 후 URL: {driver.current_url}")
+            
+            if 'login' in driver.current_url.lower():
+                print("❌ 세션 만료로 로그인 페이지로 이동됨")
+                return False
+                
+        except Exception as e:
+            print(f"발송완료 페이지 이동 실패: {e}")
+            return False
+        
+        print("✅ 로그인 성공!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 로그인 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def get_email_list_from_website():
+    """스티비 웹사이트에서 이메일 목록 스크래핑"""
+    print("이메일 목록 페이지로 이동 중...")
+    driver.get('https://stibee.com/emails')
+    time.sleep(5)
+    
+    # 현재 URL 확인
+    current_url = driver.current_url
+    print(f"현재 URL: {current_url}")
+    
+    # 로그인 페이지로 리다이렉트되었는지 확인
+    if 'login' in current_url:
+        print("❌ 로그인 세션이 만료되었습니다. 다시 로그인이 필요합니다.")
+        return []
+    
+    # 디버깅용: 페이지 HTML 저장
+    print("파일 저장 시도: stibee_emails_page.html")
+    try:
+        with open('stibee_emails_page.html', 'w', encoding='utf-8') as f:
+            f.write(driver.page_source)
+        print("이메일 목록 페이지 HTML을 stibee_emails_page.html로 저장했습니다.")
+    except Exception as e:
+        print(f"파일 저장 실패: {e}")
+    
+    emails = []
+    try:
+        # 페이지가 완전히 로드될 때까지 대기
+        print("이메일 목록 테이블 로딩 대기 중...")
+        time.sleep(3)
+        
+        # 다양한 XPATH 시도
+        xpath_patterns = [
+            '//table/tbody/tr',
+            '//div[contains(@class, "email-list")]//tr',
+            '//div[contains(@class, "table")]//tr',
+            '//tbody/tr',
+            '//tr[contains(@class, "email-row")]'
+        ]
+        
+        rows = []
+        for pattern in xpath_patterns:
+            try:
+                rows = driver.find_elements(By.XPATH, pattern)
+                if rows:
+                    print(f"XPATH 패턴 '{pattern}'으로 {len(rows)}개 행 발견")
+                    break
+            except Exception as e:
+                print(f"XPATH 패턴 '{pattern}' 실패: {e}")
+                continue
+        
+        print(f"발견된 이메일 수: {len(rows)}")
+        
+        if not rows:
+            print("이메일 목록을 찾을 수 없습니다. 페이지 구조를 확인해주세요.")
+            return []
+        
+        for i, row in enumerate(rows[:5]):  # 최대 5개만 처리
+            try:
+                # 다양한 링크 추출 방법 시도
+                link_selectors = [
+                    './/td[1]//a',
+                    './/a[contains(@href, "/email/")]',
+                    './/a',
+                    './/td//a'
+                ]
+                
+                title_element = None
+                for selector in link_selectors:
+                    try:
+                        title_element = row.find_element(By.XPATH, selector)
+                        break
+                    except:
+                        continue
+                
+                if title_element:
+                    title = title_element.text.strip()
+                    href = title_element.get_attribute('href')
+                    
+                    # 이메일 ID 추출 (URL에서)
+                    email_id_match = re.search(r'/email/(\d+)', href)
+                    email_id = email_id_match.group(1) if email_id_match else None
+                    
+                    if email_id and title:
+                        emails.append({
+                            'id': email_id,
+                            'subject': title,
+                            'url': href
+                        })
+                        print(f"이메일 발견: ID={email_id}, 제목={title}")
+                
+            except Exception as e:
+                print(f"행 {i+1} 처리 오류: {e}")
+                continue
+                
+    except Exception as e:
+        print(f"이메일 목록 스크래핑 오류: {e}")
+    
+    return emails
+
+def get_email_list_from_api():
+    """스티비 API로 최근 이메일 목록 가져오기"""
+    if not STIBEE_API_KEY or STIBEE_API_KEY == 'your_api_key_here':
+        print("API 키가 없거나 설정되지 않아서 웹사이트에서 스크래핑합니다.")
+        return get_email_list_from_website()
+    
+    # 스티비 API 문서에 따른 정확한 엔드포인트 (v2)
+    api_url = 'https://api.stibee.com/v2/emails'
+    headers = {
+        'AccessToken': STIBEE_API_KEY,
+        'Content-Type': 'application/json'
+    }
+    
+    # API 파라미터 (전체 이메일 가져오기)
+    params = {
+        'limit': 1000,  # 충분히 큰 값으로 설정
+        'offset': 0
+    }
+    
+    try:
+        print(f"API 요청: {api_url}")
+        print(f"헤더: AccessToken={STIBEE_API_KEY[:10]}...")
+        print(f"파라미터: {params}")
+        
+        response = requests.get(api_url, headers=headers, params=params)
+        print(f"응답 상태 코드: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"응답 데이터 구조: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+            
+            # API 응답 구조에 따라 이메일 목록 추출
+            if 'items' in data:
+                emails = data['items']
+                print(f"총 이메일 수: {data.get('total', 0)}")
+            elif 'data' in data:
+                emails = data['data']
+            elif isinstance(data, list):
+                emails = data
+            else:
+                print(f"예상치 못한 응답 구조: {data}")
+                return []
+            
+            # 최근 순으로 정렬 (created_at 기준)
+            if emails and 'created_at' in emails[0]:
+                emails.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+            
+            print(f"API에서 {len(emails)}개의 이메일을 가져왔습니다.")
+            for email in emails[:5]:  # 처음 5개만 출력
+                print(f"  - ID: {email.get('id')}, 제목: {email.get('subject', 'N/A')}")
+            return emails
+        else:
+            print(f"API 오류: {response.status_code}")
+            print(f"오류 내용: {response.text}")
+            
+            # 권한 관련 오류인지 확인
+            if response.status_code == 403:
+                print("❌ 권한 오류: 프로 또는 엔터프라이즈 요금제가 필요합니다.")
+            elif response.status_code == 401:
+                print("❌ 인증 오류: API 키가 유효하지 않습니다.")
+            
+            print("웹사이트에서 스크래핑으로 전환합니다.")
+            return get_email_list_from_website()
+    except Exception as e:
+        print(f"API 요청 오류: {e}")
+        print("웹사이트에서 스크래핑으로 전환합니다.")
+        return get_email_list_from_website()
+
+def ensure_logged_in():
+    # 로그인 페이지로 리다이렉트되었는지 확인하고, 필요시 재로그인
+    if 'login' in driver.current_url:
+        print("세션 만료, 재로그인 시도")
+        stibee_login()
+
+def get_existing_email_ids():
+    """구글시트에서 기존에 기록된 이메일 ID 목록 가져오기"""
+    try:
+        sheet1 = client.open_by_url(sheet_url).worksheet('메일 발송 성과')
+        existing_data = sheet1.get_all_values()
+        
+        if len(existing_data) <= 1:  # 헤더만 있는 경우
+            return set()
+        
+        # 첫 번째 열(이메일 ID)만 추출
+        existing_ids = set()
+        for row in existing_data[1:]:  # 헤더 제외
+            if row[0] and row[0].strip():  # 빈 값이 아닌 경우
+                existing_ids.add(row[0].strip())
+        
+        print(f"📊 기존 이메일 ID 수: {len(existing_ids)}")
+        return existing_ids
+        
+    except Exception as e:
+        print(f"❌ 기존 이메일 ID 가져오기 실패: {e}")
+        return set()
+
+def update_google_sheet_sheet1_append(email_id, stats):
+    """메일 발송 성과 시트에 데이터 추가"""
+    try:
+        print(f"📝 구글시트 업데이트 시도 중...")
+        print(f"   이메일 ID: {email_id}")
+        print(f"   통계 데이터: {stats}")
+        
+        # 통계 데이터 유효성 검사
+        if not stats:
+            print("   ❌ 통계 데이터가 비어있음")
+            return False
+        
+        if not isinstance(stats, dict):
+            print(f"   ❌ 통계 데이터가 딕셔너리가 아님: {type(stats)}")
+            return False
+        
+        # 필수 필드 확인
+        required_fields = ['메일제목', '발송일자', '발송성공수', '오픈수', '클릭수', '수신거부수']
+        missing_fields = []
+        for field in required_fields:
+            if field not in stats or not stats[field]:
+                missing_fields.append(field)
+        
+        if missing_fields:
+            print(f"   ❌ 누락된 필드: {missing_fields}")
+            print(f"   📊 현재 통계 데이터: {stats}")
+            return False
+        
+        # 구글시트 접근 테스트
+        try:
+            print(f"   🔐 구글시트 접근 시도...")
+            sheet1 = client.open_by_url(sheet_url).worksheet('메일 발송 성과')
+            print(f"   ✅ 구글시트 접근 성공")
+        except Exception as e:
+            print(f"   ❌ 구글시트 접근 실패: {e}")
+            print(f"   💡 시트명 '메일 발송 성과'가 정확한지 확인해주세요")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        # 중복 체크 (이메일 ID 기준)
+        try:
+            print(f"   🔍 중복 체크 중...")
+            existing_data = sheet1.get_all_values()
+            print(f"   📊 기존 데이터 행 수: {len(existing_data)}")
+            
+            if len(existing_data) > 1:  # 헤더가 있는 경우
+                existing_ids = [row[0] for row in existing_data[1:] if row[0].strip()]
+                print(f"   📋 기존 이메일 ID 목록: {existing_ids[:5]}...")  # 처음 5개만 표시
+                
+                if email_id in existing_ids:
+                    print(f"   ⏭️ 이미 존재하는 이메일 ID: {email_id}")
+                    return True  # 중복이지만 성공으로 처리
+                else:
+                    print(f"   ✅ 새로운 이메일 ID: {email_id}")
+            else:
+                print(f"   ⚠️ 헤더만 존재 (데이터 없음)")
+                
+        except Exception as e:
+            print(f"   ⚠️ 중복 체크 실패: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 데이터 전처리 및 검증
+        try:
+            # 발송일자 형식 정리 (원본 형식 유지)
+            sent_date = stats.get('발송일자', '')
+            if sent_date:
+                print(f"   🔍 원본 발송일자: {sent_date}")
+                
+                # 원본 형식을 그대로 유지 (변환하지 않음)
+                print(f"   📅 원본 형식 유지: {sent_date}")
+                
+                # 단, 불완전한 형식 (2025.)만 처리
+                if sent_date.endswith('.') and len(sent_date) <= 5:
+                    print(f"   ⚠️ 불완전한 날짜 형식: {sent_date}")
+                    # 현재 날짜로 대체
+                    from datetime import datetime
+                    current_date = datetime.now()
+                    sent_date = f"{current_date.year}. {current_date.month}. {current_date.day}. 오전 12:00"
+                    print(f"   📅 현재 날짜로 대체: {sent_date}")
+            
+            # 숫자 데이터 정리 (쉼표 제거, 숫자만 추출)
+            def clean_number(value):
+                if not value:
+                    return '0'
+                # 쉼표 제거하고 숫자만 추출
+                cleaned = str(value).replace(',', '').replace(' ', '')
+                if cleaned.isdigit():
+                    return cleaned
+                return '0'
+            
+            # 퍼센트 데이터 정리
+            def clean_percentage(value):
+                if not value:
+                    return '0%'
+                # % 기호가 있으면 그대로, 없으면 추가
+                if '%' in str(value):
+                    return str(value)
+                return f"{value}%"
+            
+            # 구글시트의 실제 열 구조에 맞춰 데이터 구성
+            new_row = [
+                str(email_id),                                    # A열: 이메일ID
+                sent_date,                                        # B열: 발송일자
+                str(stats.get('메일제목', '')),                   # C열: 메일 제목
+                clean_number(stats.get('발송성공수', '0')),        # D열: 발송성공수
+                clean_percentage(stats.get('발송성공율', '0%')),   # E열: 발송성공율
+                clean_number(stats.get('오픈수', '0')),           # F열: 오픈수
+                clean_percentage(stats.get('오픈율', '0%')),      # G열: 오픈율
+                clean_number(stats.get('클릭수', '0')),           # H열: 클릭수
+                clean_percentage(stats.get('클릭률', '0%')),      # I열: 클릭률
+                clean_number(stats.get('수신거부수', '0'))         # J열: 수신거부수
+            ]
+            
+            print(f"📊 입력할 데이터: {new_row}")
+            
+            # 데이터 유효성 최종 검사
+            if not email_id or str(email_id).strip() == '':
+                print("   ❌ 이메일 ID가 비어있음")
+                return False
+                
+            if not stats.get('메일제목') or str(stats.get('메일제목', '')).strip() == '':
+                print("   ❌ 메일 제목이 비어있음")
+                return False
+            
+            # 빈 셀 방지를 위해 모든 값이 비어있지 않은지 확인
+            for i, value in enumerate(new_row):
+                if not value or str(value).strip() == '':
+                    print(f"   ❌ {i+1}번째 열의 값이 비어있음: {value}")
+                    new_row[i] = '0' if i in [3, 5, 7, 9] else 'N/A'  # 숫자 열은 0, 텍스트 열은 N/A
+            
+            print(f"📊 최종 입력 데이터: {new_row}")
+            
+        except Exception as e:
+            print(f"   ❌ 데이터 전처리 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        # 구글시트에 행 추가 (재시도 로직 포함)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                print(f"   📝 구글시트에 행 추가 시도 {attempt + 1}/{max_retries}...")
+                
+                # append_row 시도
+                try:
+                    result = sheet1.append_row(new_row)
+                    print(f"   ✅ append_row 성공!")
+                except Exception as append_error:
+                    print(f"   ⚠️ append_row 실패: {append_error}")
+                    # append_row가 실패하면 insert_row 사용
+                    try:
+                        print("   🔄 insert_row 시도...")
+                        current_row_count = len(sheet1.get_all_values())
+                        result = sheet1.insert_row(new_row, current_row_count + 1)
+                        print(f"   ✅ insert_row 성공!")
+                    except Exception as insert_error:
+                        print(f"   ❌ insert_row도 실패: {insert_error}")
+                        raise insert_error
+                
+                print(f"   ✅ 구글시트 업데이트 성공! (시도 {attempt + 1}/{max_retries})")
+                print(f"   결과: {result}")
+                
+                # 추가된 행 확인
+                try:
+                    updated_data = sheet1.get_all_values()
+                    print(f"   📊 업데이트 후 총 행 수: {len(updated_data)}")
+                    if len(updated_data) > 0:
+                        last_row = updated_data[-1]
+                        print(f"   📋 마지막 행: {last_row}")
+                        
+                        # 새로 추가된 행이 올바른지 확인
+                        if last_row[0] == str(email_id):
+                            print(f"   ✅ 새로 추가된 행 확인 완료: 이메일 ID {email_id}")
+                        else:
+                            print(f"   ⚠️ 새로 추가된 행 확인 실패: 예상 ID {email_id}, 실제 ID {last_row[0]}")
+                            
+                except Exception as e:
+                    print(f"   ⚠️ 업데이트 확인 실패: {e}")
+                
+                return True
+                
+            except Exception as e:
+                print(f"   ❌ 구글시트 업데이트 실패 (시도 {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    print(f"   🔄 재시도 중... ({attempt + 2}/{max_retries})")
+                    time.sleep(3)  # 재시도 전 대기 시간 증가
+                else:
+                    print(f"   ❌ 최대 재시도 횟수 초과")
+                    import traceback
+                    traceback.print_exc()
+                    return False
+        
+    except Exception as e:
+        print(f"❌ 구글시트 업데이트 전체 오류: {e}")
+        print(f"   시도한 데이터: {new_row}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def extract_dashboard_stats(dashboard_url):
+    """대시보드에서 통계 정보 추출"""
+    try:
+        print("대시보드 통계 정보 추출 중...")
+        
+        # 메일 제목 추출 (여러 XPATH 패턴 시도)
+        subject = "제목 없음"
+        subject_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div',
+            '//h1',
+            '//div[contains(@class, "title")]',
+            '//div[contains(@class, "subject")]',
+            '//div[contains(@class, "email-title")]',
+            '//span[contains(@class, "title")]'
+        ]
+        
+        for pattern in subject_patterns:
+            try:
+                subject_elem = driver.find_element(By.XPATH, pattern)
+                subject = subject_elem.text.strip()
+                if subject:
+                    print(f"  ✅ 메일 제목: {subject}")
+                    break
+            except:
+                continue
+        
+        # 발송일자 추출 (여러 XPATH 패턴 시도)
+        sent_date = ""
+        date_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[1]/div[2]/div/div[2]/div[3]/div[2]',
+            '//div[contains(text(), "발송")]//span',
+            '//span[contains(text(), "발송")]',
+            '//div[contains(@class, "date")]',
+            '//span[contains(@class, "date")]',
+            '//div[contains(text(), "2024")]',
+            '//span[contains(text(), "2024")]',
+            '//div[contains(text(), "2025")]',
+            '//span[contains(text(), "2025")]',
+            '//div[contains(text(), "발송일")]',
+            '//span[contains(text(), "발송일")]',
+            '//div[contains(text(), "보낸 날짜")]',
+            '//span[contains(text(), "보낸 날짜")]'
+        ]
+        
+        for pattern in date_patterns:
+            try:
+                date_elem = driver.find_element(By.XPATH, pattern)
+                date_text = date_elem.text.strip()
+                if date_text and any(char.isdigit() for char in date_text):
+                    # 원본 날짜 텍스트를 그대로 사용 (변환하지 않음)
+                    sent_date = date_text
+                    print(f"  ✅ 발송일자 (원본): {sent_date}")
+                    break
+                        
+            except Exception as e:
+                print(f"  ⚠️ 날짜 패턴 {pattern} 처리 실패: {e}")
+                continue
+        
+        # 통계 정보 추출을 위한 공통 패턴
+        stats_data = {}
+        
+        # 발송성공수 추출
+        sent_success_count = "0"
+        sent_success_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[2]/div[2]/div[1]/div[1]/span[2]',
+            '//div[contains(text(), "발송성공")]//span[2]',
+            '//span[contains(text(), "발송성공")]/following-sibling::span',
+            '//div[contains(@class, "success")]//span[2]'
+        ]
+        
+        for pattern in sent_success_patterns:
+            try:
+                elem = driver.find_element(By.XPATH, pattern)
+                sent_success_count = elem.text.strip()
+                if sent_success_count and sent_success_count.replace(',', '').isdigit():
+                    print(f"  ✅ 발송성공수: {sent_success_count}")
+                    break
+            except:
+                continue
+        
+        # 발송성공율 추출
+        sent_success_rate = "0%"
+        sent_success_rate_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[2]/div[2]/div[1]/div[2]/span',
+            '//div[contains(text(), "발송성공")]//span[contains(text(), "%")]',
+            '//span[contains(text(), "%")]'
+        ]
+        
+        for pattern in sent_success_rate_patterns:
+            try:
+                elem = driver.find_element(By.XPATH, pattern)
+                sent_success_rate = elem.text.strip()
+                if sent_success_rate and "%" in sent_success_rate:
+                    print(f"  ✅ 발송성공율: {sent_success_rate}")
+                    break
+            except:
+                continue
+        
+        # 오픈수 추출
+        open_count = "0"
+        open_count_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[2]/div[2]/div[2]/div[1]/span[2]',
+            '//div[contains(text(), "오픈")]//span[2]',
+            '//span[contains(text(), "오픈")]/following-sibling::span',
+            '//div[contains(@class, "open")]//span[2]'
+        ]
+        
+        for pattern in open_count_patterns:
+            try:
+                elem = driver.find_element(By.XPATH, pattern)
+                open_count = elem.text.strip()
+                if open_count and open_count.replace(',', '').isdigit():
+                    print(f"  ✅ 오픈수: {open_count}")
+                    break
+            except:
+                continue
+        
+        # 오픈율 추출
+        open_rate = "0%"
+        open_rate_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[2]/div[2]/div[2]/div[2]/span',
+            '//div[contains(text(), "오픈")]//span[contains(text(), "%")]'
+        ]
+        
+        for pattern in open_rate_patterns:
+            try:
+                elem = driver.find_element(By.XPATH, pattern)
+                open_rate = elem.text.strip()
+                if open_rate and "%" in open_rate:
+                    print(f"  ✅ 오픈율: {open_rate}")
+                    break
+            except:
+                continue
+        
+        # 클릭수 추출
+        click_count = "0"
+        click_count_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[2]/div[2]/div[3]/div[1]/span[2]',
+            '//div[contains(text(), "클릭")]//span[2]',
+            '//span[contains(text(), "클릭")]/following-sibling::span',
+            '//div[contains(@class, "click")]//span[2]'
+        ]
+        
+        for pattern in click_count_patterns:
+            try:
+                elem = driver.find_element(By.XPATH, pattern)
+                click_count = elem.text.strip()
+                if click_count and click_count.replace(',', '').isdigit():
+                    print(f"  ✅ 클릭수: {click_count}")
+                    break
+            except:
+                continue
+        
+        # 클릭률 추출
+        click_rate = "0%"
+        click_rate_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[2]/div[2]/div[3]/div[2]/span',
+            '//div[contains(text(), "클릭")]//span[contains(text(), "%")]'
+        ]
+        
+        for pattern in click_rate_patterns:
+            try:
+                elem = driver.find_element(By.XPATH, pattern)
+                click_rate = elem.text.strip()
+                if click_rate and "%" in click_rate:
+                    print(f"  ✅ 클릭률: {click_rate}")
+                    break
+            except:
+                continue
+        
+        # 수신거부수 추출
+        unsub_count = "0"
+        unsub_count_patterns = [
+            '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[2]/div[2]/div[4]/div[1]/span[2]',
+            '//div[contains(text(), "수신거부")]//span[2]',
+            '//span[contains(text(), "수신거부")]/following-sibling::span',
+            '//div[contains(@class, "unsubscribe")]//span[2]'
+        ]
+        
+        for pattern in unsub_count_patterns:
+            try:
+                elem = driver.find_element(By.XPATH, pattern)
+                unsub_count = elem.text.strip()
+                if unsub_count and unsub_count.replace(',', '').isdigit():
+                    print(f"  ✅ 수신거부수: {unsub_count}")
+                    break
+            except:
+                continue
+        
+        stats = {
+            '메일제목': subject,
+            '발송일자': sent_date,
+            '발송성공수': sent_success_count,
+            '발송성공율': sent_success_rate,
+            '오픈수': open_count,
+            '오픈율': open_rate,
+            '클릭수': click_count,
+            '클릭률': click_rate,
+            '수신거부수': unsub_count
+        }
+        
+        print(f"  📋 추출 완료된 통계: {stats}")
+        return stats
+        
+    except Exception as e:
+        print(f"  ❌ 대시보드 통계 추출 전체 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+def collect_all_sent_emails():
+    """발송완료된 모든 이메일의 통계 정보를 수집하여 구글시트에 업데이트"""
+    page = 1
+    max_pages = 4  # 최대 4페이지까지만 처리
+    existing_ids = get_existing_email_ids()
+    updated_count = 0
+    failed_count = 0
+    
+    print(f"\n🚀 이메일 데이터 수집 시작!")
+    print(f"📅 모든 발송완료 메일 수집")
+    print(f"📊 기존에 기록된 이메일 ID 수: {len(existing_ids)}")
+    print(f"📄 구글시트 URL: {sheet_url}")
+    print(f"📄 최대 처리 페이지: {max_pages}페이지")
+    print("=" * 80)
+    
+    while page <= max_pages:
+        print(f"\n📄 {page}페이지 처리 중... (최대 {max_pages}페이지)")
+        url = f'https://stibee.com/emails/{page}?emailStatus=3'
+        
+        try:
+            driver.get(url)
+            time.sleep(8)  # 페이지 로딩 대기
+            
+            # 현재 URL 확인
+            current_url = driver.current_url
+            print(f"  📍 현재 URL: {current_url}")
+            
+            # 로그인 페이지로 리다이렉트되었는지 확인
+            if 'login' in current_url:
+                print(f"  ❌ 로그인 세션이 만료되었습니다. 재로그인 시도...")
+                if not stibee_login():
+                    print("❌ 재로그인 실패. 프로그램을 종료합니다.")
+                    break
+                # 재로그인 후 다시 현재 페이지로 이동
+                driver.get(url)
+                time.sleep(5)
+            
+            # 페이지 소스 확인
+            page_source = driver.page_source
+            if '이메일' in page_source or 'email' in page_source.lower():
+                print(f"  ✅ 페이지에 이메일 관련 내용 발견")
+            else:
+                print(f"  ⚠️ 페이지에 이메일 관련 내용이 없음")
+            
+            # 이메일 요소 찾기 - 개선된 방법
+            print(f"  🔍 이메일 요소 검색 중...")
+            
+            # 방법 1: 페이지 소스에서 직접 이메일 ID 추출 (가장 안정적)
+            print(f"    🔍 페이지 소스에서 이메일 ID 추출 중...")
+            
+            # 다양한 이메일 링크 패턴 시도
+            email_patterns = [
+                r'https://stibee\.com/email/(\d+)/dashboard',
+                r'https://stibee\.com/email/(\d+)/logs',
+                r'https://stibee\.com/email/(\d+)/stats',
+                r'https://stibee\.com/email/(\d+)',
+                r'/email/(\d+)/dashboard',
+                r'/email/(\d+)/logs',
+                r'/email/(\d+)/stats',
+                r'/email/(\d+)'
+            ]
+            
+            all_email_ids = []
+            for pattern in email_patterns:
+                matches = re.findall(pattern, page_source)
+                if matches:
+                    print(f"      🎯 패턴 '{pattern}'으로 {len(matches)}개 이메일 ID 발견")
+                    all_email_ids.extend(matches)
+            
+            # 중복 제거 및 정렬
+            unique_email_ids = list(set(all_email_ids))
+            unique_email_ids.sort(key=int)  # 숫자 순으로 정렬
+            
+            if unique_email_ids:
+                print(f"    🎯 총 {len(unique_email_ids)}개의 고유한 이메일 ID 발견!")
+                print(f"    📋 이메일 ID 목록: {unique_email_ids[:10]}...")  # 처음 10개만 표시
+                
+                # 각 이메일 ID로 대시보드 접근
+                processed_count = 0
+                for email_index, email_id in enumerate(unique_email_ids):  # 모든 이메일 처리
+                    try:
+                        print(f"\n    📧 {email_index+1}번째 이메일 처리 중... (ID: {email_id})")
+                        
+                        # 이미 처리된 이메일인지 확인
+                        if email_id in existing_ids:
+                            print(f"      ⏭️ 이미 처리된 이메일 ID: {email_id}, 건너뛰기")
+                            continue
+                        
+                        # 대시보드 URL 직접 구성
+                        dashboard_url = f'https://stibee.com/email/{email_id}/dashboard'
+                        print(f"      🔗 대시보드 URL: {dashboard_url}")
+                        
+                        # 대시보드 페이지로 직접 이동
+                        print(f"      🔄 대시보드 페이지로 이동 중...")
+                        driver.get(dashboard_url)
+                        time.sleep(5)
+                        
+                        # 대시보드 로딩 확인
+                        try:
+                            WebDriverWait(driver, 15).until(
+                                EC.presence_of_element_located((By.XPATH, '//h1 | //div[contains(@class, "title")]'))
+                            )
+                            print(f"      ✅ 대시보드 로딩 완료")
+                        except:
+                            print(f"      ⚠️ 대시보드 로딩 시간 초과, 계속 진행")
+                        
+                        # 발송일자 확인 (30일 이내인지 체크)
+                        try:
+                            # 발송일자 추출 시도
+                            date_patterns = [
+                                '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[1]/div[2]/div/div[2]/div[3]/div[2]',
+                                '//div[contains(text(), "발송")]//span',
+                                '//span[contains(text(), "발송")]',
+                                '//div[contains(@class, "date")]',
+                                '//span[contains(@class, "date")]',
+                                '//div[contains(text(), "2024")]',
+                                '//span[contains(text(), "2024")]',
+                                '//div[contains(text(), "2025")]',
+                                '//span[contains(text(), "2025")]',
+                                '//div[contains(text(), "발송일")]',
+                                '//span[contains(text(), "발송일")]',
+                                '//div[contains(text(), "보낸 날짜")]',
+                                '//span[contains(text(), "보낸 날짜")]'
+                            ]
+                            
+                            sent_date = None
+                            for date_pattern in date_patterns:
+                                try:
+                                    date_elem = driver.find_element(By.XPATH, date_pattern)
+                                    date_text = date_elem.text.strip()
+                                    if date_text and any(char.isdigit() for char in date_text):
+                                        print(f"      🔍 날짜 텍스트 발견: {date_text}")
+                                        
+                                        # 원본 날짜 텍스트를 그대로 사용 (변환하지 않음)
+                                        sent_date_text = date_text
+                                        print(f"      📅 발송일자 (원본): {sent_date_text}")
+                                        
+                                        # 30일 이내 발송 여부 확인을 위해 날짜 파싱
+                                        # 한국어 형식: 2025. 8. 5. 오전 9:00
+                                        kr_match = re.search(r'(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})', date_text)
+                                        if kr_match:
+                                            year, month, day = map(int, kr_match.groups())
+                                            sent_date = datetime(year, month, day)
+                                            print(f"      📅 발송일자 (파싱): {sent_date.strftime('%Y-%m-%d')}")
+                                        else:
+                                            # 다른 형식이면 현재 날짜로 가정하고 계속 진행
+                                            sent_date = None
+                                            print(f"      ⚠️ 날짜 파싱 실패, 계속 진행")
+                                        
+                                        break
+                                            
+                                except Exception as e:
+                                    print(f"      ⚠️ 날짜 패턴 {pattern} 처리 실패: {e}")
+                                    continue
+                            
+                            # 발송일자 확인 (모든 메일 처리)
+                            if sent_date:
+                                print(f"      📅 발송일자: {sent_date.strftime('%Y-%m-%d')}")
+                            elif not sent_date:
+                                print(f"      ⚠️ 발송일자를 확인할 수 없음, 계속 진행")
+                            
+                        except Exception as e:
+                            print(f"      ⚠️ 발송일자 확인 실패: {e}, 계속 진행")
+                        
+                        # 통계 정보 추출 (발송일자 포함)
+                        stats = extract_dashboard_stats(dashboard_url)
+                        # 발송일자를 stats에 추가
+                        if 'sent_date_text' in locals():
+                            stats['발송일자'] = sent_date_text
+                        
+                        if stats and stats.get('메일제목'):
+                            # 구글시트에 데이터 추가
+                            if update_google_sheet_sheet1_append(email_id, stats):
+                                existing_ids.add(email_id)
+                                updated_count += 1
+                                processed_count += 1
+                                print(f"      🎉 성공적으로 업데이트됨!")
+                            else:
+                                failed_count += 1
+                                print(f"      ❌ 구글시트 업데이트 실패")
+                        else:
+                            print(f"      ❌ 통계 정보 추출 실패")
+                            failed_count += 1
+                        
+                        # 메일 리스트 페이지로 복귀
+                        print(f"      🔙 메일 리스트 페이지로 복귀 중...")
+                        driver.get(url)
+                        time.sleep(3)
+                        
+                        # 한 페이지의 모든 메일을 처리한 후 다음 페이지로 (30일 이내 메일 수에 관계없이)
+                        # 현재 페이지의 모든 메일을 처리했는지 확인
+                        if email_index >= len(all_email_ids) - 1:  # 마지막 메일까지 처리 완료
+                            print(f"      ✅ 현재 페이지의 모든 메일 처리 완료, 다음 페이지로 이동")
+                            break
+                            
+                    except Exception as e:
+                        print(f"      ❌ 이메일 처리 중 오류: {e}")
+                        failed_count += 1
+                        # 메일 리스트 페이지로 복귀
+                        try:
+                            driver.get(url)
+                            time.sleep(3)
+                        except:
+                            pass
+                        continue
+                
+                # 이메일 처리가 완료되면 다음 페이지로
+                if processed_count > 0:
+                    page += 1
+                    print(f"  📄 다음 페이지({page})로 이동...")
+                    print(f"  📊 현재까지 업데이트된 이메일: {updated_count}개")
+                    print(f"  📊 현재까지 실패: {failed_count}개")
+                    continue
+                else:
+                    print(f"  ⚠️ 처리할 수 있는 30일 이내 메일이 없음")
+                    # 다음 페이지가 있는지 확인
+                    if page < max_pages:
+                        next_page_url = f'https://stibee.com/emails/{page + 1}?emailStatus=3'
+                        print(f"  🔍 다음 페이지 확인: {next_page_url}")
+                        
+                        # 다음 페이지 존재 여부 확인
+                        try:
+                            driver.get(next_page_url)
+                            time.sleep(5)
+                            next_page_source = driver.page_source
+                            
+                            if '이메일' in next_page_source or 'email' in next_page_source.lower():
+                                print(f"  ✅ 다음 페이지({page + 1})에 이메일이 있음, 계속 진행")
+                                page += 1
+                                continue
+                            else:
+                                print(f"  ❌ 다음 페이지({page + 1})에 이메일이 없음, 종료")
+                                break
+                        except Exception as e:
+                            print(f"  ❌ 다음 페이지 확인 실패: {e}")
+                            break
+                    else:
+                        print(f"  📄 최대 페이지({max_pages})에 도달, 종료")
+                        break
+                    
+            else:
+                print(f"  ❌ 페이지에서 이메일 ID를 찾을 수 없음")
+                # 페이지 소스 저장하여 디버깅
+                with open(f'page_{page}_source.html', 'w', encoding='utf-8') as f:
+                    f.write(page_source)
+                print(f"  📄 페이지 {page} 소스를 page_{page}_source.html로 저장했습니다.")
+                
+                # 다음 페이지 시도
+                if page < max_pages:
+                    page += 1
+                    print(f"  📄 다음 페이지({page})로 이동 시도...")
+                    continue
+                else:
+                    print(f"  📄 최대 페이지({max_pages})에 도달, 종료")
+                    break
+                
+        except Exception as e:
+            print(f"  ❌ {page}페이지 처리 실패: {e}")
+            if page < max_pages:
+                page += 1
+                print(f"  📄 다음 페이지({page})로 이동 시도...")
+                continue
+            else:
+                print(f"  📄 최대 페이지({max_pages})에 도달, 종료")
+                break
+    
+    print(f"\n" + "=" * 80)
+    print(f"🎉 이메일 데이터 수집 완료!")
+    print(f"📅 발송일자 기준: {cutoff_date.strftime('%Y-%m-%d')} 이후")
+    print(f"📊 총 업데이트된 이메일: {updated_count}개")
+    print(f"❌ 총 실패: {failed_count}개")
+    print(f"📄 처리된 페이지: {page-1}페이지 (최대 {max_pages}페이지)")
+    print("=" * 80)
+
+def process_emails_and_update_sheets():
+    """메일 리스트를 순회하며 각 메일의 대시보드 링크를 클릭해 통계 정보를 구글시트에 바로 업데이트"""
+    emails = get_recent_emails_from_sent_page()
+    if not emails:
+        print("메일을 찾지 못했습니다.")
+        return
+
+    # 구글시트 기존 데이터 불러오기
+    existing_ids = get_existing_email_ids()
+
+    for i, email in enumerate(emails, 1):
+        email_id = email['id']
+        subject = email['subject']
+        sent_date = email['sent_date']
+        dashboard_elem = email['dashboard_elem']
+
+        print(f"\n=== {i}/{len(emails)} : {subject} ({sent_date}) ===")
+
+        # 1. 대시보드 링크 클릭
+        try:
+            dashboard_elem.click()
+            # 대시보드 페이지가 완전히 로드될 때까지 대기 (예: 메일제목 요소)
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div'))
+            )
+            time.sleep(1)
+        except Exception as e:
+            print(f"대시보드 페이지 진입 실패: {e}")
+            continue
+
+        # 대시보드 진입 후
+        try:
+            # 발송일자 추출
+            date_elem = driver.find_element(By.XPATH, '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[1]/div[2]/div/div[2]/div[3]/div[2]')
+            sent_date_str = date_elem.text.strip()  # 예: '2024-07-10'
+            sent_date = datetime.strptime(sent_date_str[:10], "%Y-%m-%d")
+            if sent_date < datetime.now() - timedelta(days=30):
+                print(f"발송일자 {sent_date_str} (30일 초과), 건너뜀")
+                # 메일 리스트로 복귀
+                driver.back()
+                continue
+        except Exception as e:
+            print(f"발송일자 추출 실패: {e}")
+            driver.back()
+            continue
+
+        # 30일 이내라면 데이터 추출 및 구글시트 업데이트
+        # 2. 메일 발송 성과 시트 (이메일ID 중복 체크)
+        if email_id not in existing_ids:
+            stats = extract_dashboard_stats(driver.current_url)
+            update_google_sheet_sheet1_append(email_id, stats)
+            existing_ids.add(email_id)
+        else:
+            print(f"이미 기록된 이메일ID: {email_id}, 건너뜀")
+
+        # 메일 리스트 페이지로 다시 돌아가기
+        driver.back()
+        # 메일 리스트가 다시 로드될 때까지 대기
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, f'//*[@id="root"]/div/div[1]/div/section/main/div/div[{i+2}]/div/div[1]/div[2]'))
+            )
+            time.sleep(1)
+        except Exception as e:
+            print(f"메일 리스트 복귀 실패: {e}")
+            break
+        time.sleep(2)
+    print(f'\n🎉 30일 이내 메일 성과 업데이트 완료!')
+
+# 1. 함수 정의 (반드시 main 실행부보다 위에 위치)
+def get_recent_emails_from_sent_page():
+    page = 1
+    while True:
+        url = f'https://stibee.com/emails/{page}?emailStatus=3'
+        driver.get(url)
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, '//*[@id="root"]/div/div[1]/div/section/main/div/div[2]/div/div[1]/div[2]'))
+            )
+        except Exception as e:
+            print(f"{page}페이지 로딩 실패: {e}")
+            break
+
+        found_recent = False
+        for N in range(2, 12):
+            try:
+                base_xpath = f'//*[@id="root"]/div/div[1]/div/section/main/div/div[{N}]/div/div[1]/div[2]'
+                date_elem = driver.find_element(By.XPATH, base_xpath + '/div[2]/em')
+                sent_date_str = date_elem.text.strip()
+                date_match = re.search(r'(\d{4})[.\- ]\s*(\d{1,2})[.\- ]\s*(\d{1,2})', sent_date_str)
+                if date_match:
+                    year, month, day = date_match.groups()
+                    sent_date = datetime(int(year), int(month), int(day))
+                else:
+                    print(f"{page}페이지 {N}번째 메일 날짜 파싱 실패: {sent_date_str}")
+                    continue
+                if sent_date < datetime.now() - timedelta(days=30):
+                    continue
+                found_recent = True
+
+                dashboard_a_elem = driver.find_element(By.XPATH, base_xpath + '/div[1]/a')
+                dashboard_url = dashboard_a_elem.get_attribute('href')
+                subject = dashboard_a_elem.text.strip()
+                email_id_match = re.search(r'/email/(\d+)/dashboard', dashboard_url)
+                email_id = email_id_match.group(1) if email_id_match else None
+
+                for attempt in range(2):
+                    try:
+                        driver.get(dashboard_url)
+                        WebDriverWait(driver, 20).until(
+                            EC.presence_of_element_located((By.XPATH, '//*[@id="root"]/div/div[1]/div/section/main/div/div/div[4]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div'))
+                        )
+                        time.sleep(2)
+                        stats = extract_dashboard_stats(dashboard_url)
+                        print(f"추출된 stats: {stats}")
+                        # 2. 구글시트 입력
+                        update_google_sheet_sheet1_append(email_id, stats)
+                        # 3. 수신거부/실패 리스트도 동일하게 반복
+                        # ...
+                        break
+                    except Exception as e:
+                        print(f"대시보드 데이터 수집 재시도({attempt+1}/2): {e}")
+                        time.sleep(3)
+                        if attempt == 1:
+                            print(f"{page}페이지 {N}번째 메일 대시보드 데이터 수집 실패")
+                driver.back()
+            except Exception as e:
+                print(f"{page}페이지 {N}번째 메일 처리 실패: {e}")
+                continue
+        if not found_recent:
+            print(f"{page}페이지에 30일 이내 메일 없음, 전체 수집 종료")
+            break
+        page += 1
+
+def test_google_sheet_access():
+    """구글시트 접근 및 쓰기 권한 테스트"""
+    try:
+        print("🔍 구글시트 접근 테스트 시작...")
+        
+        # 1. 스프레드시트 열기
+        print("   📄 스프레드시트 열기 시도...")
+        spreadsheet = client.open_by_url(sheet_url)
+        print(f"   ✅ 스프레드시트 열기 성공: {spreadsheet.title}")
+        
+        # 2. 워크시트 접근
+        print("   📋 '메일 발송 성과' 워크시트 접근 시도...")
+        worksheet = spreadsheet.worksheet('메일 발송 성과')
+        print(f"   ✅ 워크시트 접근 성공: {worksheet.title}")
+        
+        # 3. 워크시트 정보 확인
+        print(f"   📊 워크시트 크기: {worksheet.row_count}행 x {worksheet.col_count}열")
+        
+        # 4. 기존 데이터 읽기
+        print("   📖 기존 데이터 읽기 시도...")
+        existing_data = worksheet.get_all_values()
+        print(f"   ✅ 기존 데이터 읽기 성공: {len(existing_data)}행")
+        
+        if len(existing_data) > 0:
+            print(f"   📋 헤더: {existing_data[0]}")
+            if len(existing_data) > 1:
+                print(f"   📋 첫 번째 데이터 행: {existing_data[1]}")
+        
+        # 5. 테스트 데이터 쓰기 (임시)
+        print("   ✏️ 테스트 데이터 쓰기 시도...")
+        test_row = ['TEST_EMAIL_ID', '2024-08-31', '테스트 메일', '100', '100%', '50', '50%', '10', '10%', '0']
+        
+        # append_row 시도
+        try:
+            result = worksheet.append_row(test_row)
+            print(f"   ✅ append_row 성공: {result}")
+            
+            # 추가된 행 확인
+            updated_data = worksheet.get_all_values()
+            print(f"   📊 업데이트 후 총 행 수: {len(updated_data)}")
+            
+            if len(updated_data) > 0:
+                last_row = updated_data[-1]
+                print(f"   📋 마지막 행: {last_row}")
+                
+                # 테스트 행이 올바르게 추가되었는지 확인
+                if last_row[0] == 'TEST_EMAIL_ID':
+                    print("   ✅ 테스트 데이터가 올바르게 추가됨")
+                else:
+                    print(f"   ⚠️ 테스트 데이터 확인 실패: 예상 ID TEST_EMAIL_ID, 실제 ID {last_row[0]}")
+            
+            # 6. 테스트 데이터 삭제
+            print("   🗑️ 테스트 데이터 삭제 시도...")
+            worksheet.delete_rows(len(updated_data))
+            print("   ✅ 테스트 데이터 삭제 성공")
+            
+            # 삭제 확인
+            final_data = worksheet.get_all_values()
+            print(f"   📊 최종 행 수: {len(final_data)} (테스트 데이터 제거됨)")
+            
+        except Exception as e:
+            print(f"   ❌ append_row 실패: {e}")
+            
+            # insert_row 시도
+            try:
+                print("   🔄 insert_row 시도...")
+                current_row_count = len(worksheet.get_all_values())
+                result = worksheet.insert_row(test_row, current_row_count + 1)
+                print(f"   ✅ insert_row 성공: {result}")
+                
+                # 테스트 데이터 삭제
+                updated_data = worksheet.get_all_values()
+                worksheet.delete_rows(len(updated_data))
+                print("   ✅ 테스트 데이터 삭제 성공")
+                
+            except Exception as insert_error:
+                print(f"   ❌ insert_row도 실패: {insert_error}")
+                return False
+        
+        print("   🎉 구글시트 접근 테스트 완료!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 구글시트 접근 테스트 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# 2. main 실행부
+if __name__ == '__main__':
+    try:
+        print("🚀 스티비 메일 발송 결과 수집 프로그램 시작")
+        print("=" * 80)
+        
+        # 1. 구글시트 접근 테스트
+        print("🔍 1단계: 구글시트 접근 테스트")
+        if not test_google_sheet_access():
+            print("❌ 구글시트 접근 테스트 실패. 프로그램을 종료합니다.")
+            exit(1)
+        print("✅ 구글시트 접근 테스트 성공!")
+        print()
+        
+        # 2. 스티비 로그인
+        print("🔐 2단계: 스티비 로그인")
+        if not stibee_login():
+            print("❌ 스티비 로그인 실패. 프로그램을 종료합니다.")
+            exit(1)
+        print("✅ 스티비 로그인 성공!")
+        print()
+        
+        # 3. 메일 발송 결과 수집
+        print("📧 3단계: 메일 발송 결과 수집")
+        collect_all_sent_emails()
+        print()
+        
+        print("🎉 메일 발송 결과 수집 완료!")
+        print("📊 수집된 데이터: 메일제목, 발송일자, 발송성공수, 발송성공율, 오픈수, 오픈율, 클릭수, 클릭률, 수신거부수")
+        print("📄 저장 위치: 구글시트 '메일 발송 성과' 시트")
+        
+    except KeyboardInterrupt:
+        print("\n⚠️ 사용자에 의해 프로그램이 중단되었습니다.")
+    except Exception as e:
+        print(f"\n❌ 프로그램 실행 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("\n🔚 프로그램 종료 중...")
+        try:
+            if 'driver' in locals():
+                driver.quit()
+                print("✅ 웹드라이버가 안전하게 종료되었습니다.")
+        except:
+            pass
+        print("✅ 프로그램이 안전하게 종료되었습니다.")
+
+def update_unsubscribes_and_failures_only(email_ids):
+    # 이 함수는 사용하지 않음 (메일 발송 결과만 수집)
+    print("이 함수는 사용하지 않습니다. 메일 발송 결과만 수집합니다.")
+    pass
+
+def update_unsubscribe_list_from_sent_sheet():
+    # 이 함수는 사용하지 않음 (메일 발송 결과만 수집)
+    print("이 함수는 사용하지 않습니다. 메일 발송 결과만 수집합니다.")
+    pass
+
+def update_fail_list_from_sent_sheet():
+    # 이 함수는 사용하지 않음 (메일 발송 결과만 수집)
+    print("이 함수는 사용하지 않습니다. 메일 발송 결과만 수집합니다.")
+    pass
+
+def open_unsubscribe_pages_from_sheet():
+    # 이 함수는 사용하지 않음 (메일 발송 결과만 수집)
+    print("이 함수는 사용하지 않습니다. 메일 발송 결과만 수집합니다.")
+    pass
